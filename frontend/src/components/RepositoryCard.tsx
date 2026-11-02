@@ -1,4 +1,5 @@
 import { ExternalLink, Star } from "lucide-react";
+import { Link } from "react-router-dom";
 import type { Repository } from "../types";
 
 interface RepositoryCardProps {
@@ -8,8 +9,16 @@ interface RepositoryCardProps {
 export default function RepositoryCard({
   repository,
 }: RepositoryCardProps) {
+  const [owner, name] = repository.full_name.split("/");
+  const detailPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+
   return (
     <article className="repository-card">
+      <Link
+        className="repository-card__overlay"
+        to={detailPath}
+        aria-label={`Open repository overview for ${repository.full_name}`}
+      />
       <div className="repository-card__top">
         <div className="repository-avatar" aria-hidden="true">
           {repository.name.slice(0, 1).toUpperCase()}
@@ -19,19 +28,17 @@ export default function RepositoryCard({
           href={repository.url}
           target="_blank"
           rel="noreferrer"
-          aria-label={`Відкрити ${repository.full_name} на GitHub`}
+          aria-label={`Open ${repository.full_name} on GitHub`}
         >
           <ExternalLink size={17} />
         </a>
       </div>
       <p className="repository-owner">{repository.full_name.split("/")[0]}</p>
       <h3>
-        <a href={repository.url} target="_blank" rel="noreferrer">
-          {repository.name}
-        </a>
+        {repository.name}
       </h3>
       <p className="repository-description">
-        {repository.description || "Автор не додав опис до репозиторію."}
+        {repository.description || "No description provided."}
       </p>
       <div className="repository-meta">
         {repository.language ? (
@@ -41,12 +48,12 @@ export default function RepositoryCard({
           </span>
         ) : (
           <span className="language-tag language-tag--muted">
-            Мову не вказано
+            Language not specified
           </span>
         )}
         <span className="star-count">
           <Star size={15} />
-          {repository.stars.toLocaleString("uk-UA")}
+          {repository.stars.toLocaleString("en-US")}
         </span>
       </div>
     </article>

@@ -1,0 +1,49 @@
+from unittest.mock import Mock
+
+from django.test import SimpleTestCase
+
+from search.client import GitHubClient, GitHubError, GitHubRateLimitError
+
+
+class GitHubClientRateLimitTests(SimpleTestCase):
+    def test_detects_search_rate_limit_even_when_core_remaining_is_positive(self):
+        response = Mock()
+        response.status_code = 403
+        response.headers = {
+            "X-RateLimit-Limit": "30",
+            "X-RateLimit-Remaining": "28",
+            "X-RateLimit-Reset": "1793653200",
+        }
+        response.json.return_value = {
+            "message": "You have exceeded a secondary rate limit."
+        }
+        response.ok = False
+
+        session = Mock()
+        session.get.return_value = response
+        client = GitHubClient(token="", timeout=1, session=session)
+
+        with self.assertRaises(GitHubRateLimitError) as raised:
+            client.search_repositories("django")
+
+        self.assertEqual(raised.exception.rate_limit["remaining"], 28)
+        self.assertEqual(raised.exception.rate_limit["reset"], 1793653200)
+
+    def test_does_not_treat_an_unrelated_forbidden_response_as_rate_limit(self):
+        response = Mock()
+        response.status_code = 403
+        response.headers = {
+            "X-RateLimit-Limit": "5000",
+            "X-RateLimit-Remaining": "4999",
+        }
+        response.json.return_value = {"message": "Resource not accessible"}
+        response.ok = False
+
+        session = Mock()
+        session.get.return_value = response
+        client = GitHubClient(token="", timeout=1, session=session)
+
+        with self.assertRaises(GitHubError) as raised:
+            client.search_repositories("django")
+
+        self.assertNotIsInstance(raised.exception, GitHubRateLimitError)

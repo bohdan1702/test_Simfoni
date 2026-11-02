@@ -1,20 +1,55 @@
-import hashlib
-import json
-import os
+from concurrent.futures import ThreadPoolExecutor
 
-import requests
 from django.core.cache import cache
-from rest_framework import status
-from rest_framework.exceptions import APIException
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .serializers import SearchSerializer
+
+from .client import GitHubClient, GitHubError
+from .serializers import RepositoryMetricsSerializer, SearchSerializer
+from .services import build_repo_report, summarize_contributors
+
+SEARCH_CACHE_TTL = 600
 
 
-class GitHubAPIError(APIException):
-    status_code = status.HTTP_502_BAD_GATEWAY
-    default_detail = "GitHub API request failed."
-    default_code = "github_api_error"
+def _cache_key(query, per_page):
+    return f"github:search:{per_page}:{query}"
+
+
+def _rate_headers(rate):
+    headers = {}
+    if rate.get("limit") is not None:
+        headers["X-RateLimit-Limit"] = str(rate["limit"])
+    if rate.get("remaining") is not None:
+        headers["X-RateLimit-Remaining"] = str(rate["remaining"])
+    if rate.get("reset") is not None:
+        headers["X-RateLimit-Reset"] = str(rate["reset"])
+    if rate.get("retry_after") is not None:
+        headers["Retry-After"] = str(rate["retry_after"])
+    return headers
+
+
+def _summarize(item):
+    return {
+        "id": item["id"],
+        "name": item["name"],
+        "full_name": item["full_name"],
+        "description": item.get("description"),
+        "url": item["html_url"],
+        "language": item.get("language"),
+        "stars": item["stargazers_count"],
+    }
+
+
+def _github_error_response(exc):
+    return Response(
+        {
+            "detail": exc.message,
+            "github_status": exc.github_status,
+            "rate_limit": exc.rate_limit,
+        },
+        status=exc.status_code,
+        headers=_rate_headers(exc.rate_limit),
+    )
 
 
 class SearchView(APIView):
@@ -27,73 +62,133 @@ class SearchView(APIView):
     def search(self, data):
         serializer = SearchSerializer(data=data)
         serializer.is_valid(raise_exception=True)
-        query = serializer.validated_data["q"]
+        query = serializer.validated_data["q"].strip().lower()
         per_page = serializer.validated_data["per_page"]
 
-        cache_key = "github_repository_search_" + hashlib.sha256(
-            json.dumps([query, per_page], ensure_ascii=True).encode()
-        ).hexdigest()
-        cached_result = cache.get(cache_key)
-        if cached_result is not None:
-            return Response(cached_result)
-
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        token = os.environ.get("GITHUB_TOKEN", "").strip()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-
-        try:
-            response = requests.get(
-                "https://api.github.com/search/repositories",
-                params={"q": query, "per_page": per_page},
-                headers=headers,
-                timeout=float(os.environ.get("GITHUB_REQUEST_TIMEOUT", "10")),
+        key = _cache_key(query, per_page)
+        cached = cache.get(key)
+        if isinstance(cached, dict) and "data" in cached and "rate_limit" in cached:
+            return Response(
+                cached["data"],
+                headers={
+                    "X-Cache": "HIT",
+                    **_rate_headers(cached["rate_limit"]),
+                },
             )
-        except requests.Timeout as exc:
-            raise GitHubAPIError(
-                detail="GitHub API request timed out.",
-                code="github_api_timeout",
-            ) from exc
-        except requests.RequestException as exc:
-            raise GitHubAPIError() from exc
+        if cached is not None:
+            cache.delete(key)
 
+        client = GitHubClient()
         try:
-            payload = response.json()
-        except requests.exceptions.JSONDecodeError as exc:
-            raise GitHubAPIError(
-                detail="GitHub API returned an invalid response.",
-                code="invalid_github_response",
-            ) from exc
-
-        if not response.ok:
-            raise GitHubAPIError(
-                detail={
-                    "message": "GitHub API request failed.",
-                    "github_status": response.status_code,
-                    "github_message": payload.get("message", "Unknown error")
-                    if isinstance(payload, dict)
-                    else "Unknown error",
-                }
-            )
+            payload, rate = client.search_repositories(query, per_page)
+        except GitHubError as exc:
+            return _github_error_response(exc)
 
         result = {
             "query": query,
             "total_count": payload.get("total_count", 0),
-            "results": [
-                {
-                    "id": item["id"],
-                    "name": item["name"],
-                    "full_name": item["full_name"],
-                    "description": item["description"],
-                    "url": item["html_url"],
-                    "language": item["language"],
-                    "stars": item["stargazers_count"],
-                }
-                for item in payload.get("items", [])
-            ],
+            "results": [_summarize(item) for item in payload.get("items", [])],
         }
-        cache.set(cache_key, result)
-        return Response(result)
+        cache.set(
+            key,
+            {"data": result, "rate_limit": rate},
+            timeout=SEARCH_CACHE_TTL,
+        )
+        return Response(result, headers={"X-Cache": "MISS", **_rate_headers(rate)})
+
+
+class RepositoryView(APIView):
+    def get(self, request, owner, name):
+        serializer = RepositoryMetricsSerializer(data={"owner": owner, "name": name})
+        serializer.is_valid(raise_exception=True)
+        owner = serializer.validated_data["owner"]
+        name = serializer.validated_data["name"]
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            repository_future = executor.submit(
+                GitHubClient().get_repository, owner, name
+            )
+            release_future = executor.submit(
+                GitHubClient().get_latest_release, owner, name
+            )
+
+            try:
+                repository, repository_rate = repository_future.result()
+                release, release_rate = release_future.result()
+            except GitHubError as exc:
+                return _github_error_response(exc)
+
+        rate = (
+            release_rate
+            if release_rate.get("remaining") is not None
+            else repository_rate
+        )
+        return Response(
+            build_repo_report(repository, release),
+            headers=_rate_headers(rate),
+        )
+
+
+class ContributorsView(APIView):
+    def get(self, request, owner, name):
+        serializer = RepositoryMetricsSerializer(data={"owner": owner, "name": name})
+        serializer.is_valid(raise_exception=True)
+        owner = serializer.validated_data["owner"]
+        name = serializer.validated_data["name"]
+
+        try:
+            stats, rate = GitHubClient().get_contributor_stats(owner, name)
+        except GitHubError as exc:
+            return _github_error_response(exc)
+
+        if stats is None:
+            retry_after = rate.get("retry_after") or 3
+            headers = {**_rate_headers(rate), "Retry-After": str(retry_after)}
+            return Response(
+                {"status": "pending"},
+                status=202,
+                headers=headers,
+            )
+
+        return Response(
+            summarize_contributors(stats),
+            headers=_rate_headers(rate),
+        )
+
+
+class RepositoryMetricsView(APIView):
+    def get(self, request, owner, name):
+        serializer = RepositoryMetricsSerializer(data={"owner": owner, "name": name})
+        serializer.is_valid(raise_exception=True)
+        owner = serializer.validated_data["owner"]
+        name = serializer.validated_data["name"]
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            repository_future = executor.submit(
+                GitHubClient().get_repository, owner, name
+            )
+            release_future = executor.submit(
+                GitHubClient().get_latest_release, owner, name
+            )
+            contributors_future = executor.submit(
+                GitHubClient().get_contributor_stats, owner, name
+            )
+
+            try:
+                repository, repository_rate = repository_future.result()
+                release, release_rate = release_future.result()
+                contributor_stats, contributor_rate = contributors_future.result()
+            except GitHubError as exc:
+                return _github_error_response(exc)
+
+        rate = contributor_rate or release_rate or repository_rate
+        result = {
+            "repository": build_repo_report(repository, release),
+            "contributors": (
+                summarize_contributors(contributor_stats)
+                if contributor_stats is not None
+                else None
+            ),
+            "contributor_stats_pending": contributor_stats is None,
+        }
+        return Response(result, headers=_rate_headers(rate))
