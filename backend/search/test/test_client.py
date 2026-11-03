@@ -5,7 +5,25 @@ from django.test import SimpleTestCase
 from search.client import GitHubClient, GitHubError, GitHubRateLimitError
 
 
-class GitHubClientRateLimitTests(SimpleTestCase):
+class GitHubClientTests(SimpleTestCase):
+    def test_sends_configured_token_as_bearer_authorization(self):
+        response = Mock()
+        response.status_code = 200
+        response.headers = {}
+        response.json.return_value = {"total_count": 0, "items": []}
+        response.ok = True
+
+        session = Mock()
+        session.get.return_value = response
+        client = GitHubClient(token="test-token", timeout=1, session=session)
+
+        client.search_repositories("django")
+
+        self.assertEqual(
+            session.get.call_args.kwargs["headers"]["Authorization"],
+            "Bearer test-token",
+        )
+
     def test_detects_search_rate_limit_even_when_core_remaining_is_positive(self):
         response = Mock()
         response.status_code = 403

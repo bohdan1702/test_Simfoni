@@ -200,3 +200,18 @@ For frontend development outside Docker, run the backend on `localhost:8000`
 and start Vite with `npm --prefix frontend run dev`. The Vite development proxy
 forwards `/api/` requests to that backend; the Docker frontend uses Nginx
 instead.
+
+
+## How AI was used
+
+I used Claude as a collaborator at every stage, from framing the problem to writing code.
+
+1. **Planning.** I started by describing the task to Claude and asking for help breaking it into steps. Claude suggested an order where each step produces a working piece: the GitHub client, the metrics, the repository report, caching, search and contributors, then the frontend, then Docker. I reviewed that order and changed parts of it, for example postponing the repository comparison and the median time-to-first-response on issues.
+
+2. **Code.** Claude drafted the modules, and I checked them: I read each file, ran it, and changed what I didn't like or what didn't fit my decisions. I rejected some suggestions along the way. For instance, I first used a hash for cache keys and later removed it, because it made debugging harder without a real benefit.
+
+3. **Verification and tests.** After each step of the plan I reviewed the code and ran the tests. Client and metrics tests run without network access, so they could be run often. When a test failed or behavior looked odd, I investigated the cause instead of adjusting the test to fit the code.
+
+4. **Documentation.** I drafted the README and the problem statement together with Claude, but rewrote the wording in my own words and checked any ambiguous claims against the actual code.
+
+The decisions were mine: which signals to include, why there is no overall score, which limitations to state openly, and what to leave out. AI helped me reach a working version faster, but those choices are my own.
