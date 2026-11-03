@@ -27,8 +27,10 @@ docker compose up --build
 - Frontend: <http://localhost:5173>
 - API base path: <http://localhost:8000/api/> (there is no API index page; see
   the working endpoint examples below)
-- Redis is available to the backend container for caching and is not published
-  on a host port.
+- The frontend's Nginx server forwards `/api/` requests to the backend container
+  at `backend:8000`; the backend reaches Redis at `redis:6379`.
+- Redis is not published on a host port. Its data is persisted in the
+  `redis_data` Docker volume.
 
 Stop the services with `Ctrl+C`, or from another terminal run:
 
@@ -37,6 +39,27 @@ docker compose down
 ```
 
 To also delete the persisted Redis data, run `docker compose down --volumes`.
+
+### Configuration
+
+The backend reads `backend/.env`; `backend/.env.example` lists the supported
+variables. Docker Compose overrides `REDIS_URL` with the internal service
+address `redis://redis:6379/0`. The example's `localhost` Redis URL is for
+running the backend directly on your host, where Redis must be available on
+port 6379.
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `GITHUB_TOKEN` | Optional GitHub API token; used only by the backend | empty |
+| `GITHUB_REQUEST_TIMEOUT` | Timeout in seconds for GitHub API requests | `10` |
+| `REDIS_URL` | Django cache connection | `redis://localhost:6379/0` in `.env.example`; overridden by Compose |
+| `CACHE_TTL_SECONDS` | Django cache default timeout | `7200` |
+| `DJANGO_SECRET_KEY` | Required Django secret key | Set in `.env.example`; replace for deployments |
+| `DJANGO_DEBUG` | Django debug mode | `False` |
+| `DJANGO_ALLOWED_HOSTS` | Comma-separated Django allowed hosts | `localhost,127.0.0.1` |
+
+The search endpoint currently sets its own 10-minute cache TTL. Repository
+overview and contributor responses are not cached.
 
 ### GitHub API and tokens
 
@@ -83,9 +106,9 @@ of authors whose combined changes account for at least 50% of the total. The
 corresponding authors and their shares are shown alongside the result.
 
 GitHub may still be calculating contributor statistics. In that case, the API
-returns `202 Accepted` and a `Retry-After` header; the frontend retries up to
-four times. A bus factor of zero means there is not enough data to estimate it,
-not that there is no risk.
+returns `202 Accepted` and a `Retry-After` header; the frontend makes up to four
+requests, honoring that header between attempts. A bus factor of zero means
+there is not enough data to estimate it, not that there is no risk.
 
 ## API
 
@@ -172,3 +195,8 @@ Install frontend dependencies and build/type-check the TypeScript application:
 npm --prefix frontend ci
 npm --prefix frontend run build
 ```
+
+For frontend development outside Docker, run the backend on `localhost:8000`
+and start Vite with `npm --prefix frontend run dev`. The Vite development proxy
+forwards `/api/` requests to that backend; the Docker frontend uses Nginx
+instead.
